@@ -2,7 +2,7 @@
 
 Lumina is a sleek, modern, and high-performance blogging platform built with a focus on rich typography and a premium user experience. It features a robust Go backend and a responsive React frontend, providing a seamless storytelling environment.
 
-![Lumina Header](frontend/src/assets/hero.png)
+
 
 ## 🚀 Key Features
 
