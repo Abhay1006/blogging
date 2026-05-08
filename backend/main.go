@@ -134,11 +134,20 @@ func main() {
 	if allowedOrigins == "" {
 		allowedOrigins = "http://localhost:5173,http://127.0.0.1:5173"
 	}
+	
+	// Clean up the string: remove spaces and trailing slashes from each origin
+	origins := strings.Split(allowedOrigins, ",")
+	for i, origin := range origins {
+		origins[i] = strings.TrimSuffix(strings.TrimSpace(origin), "/")
+	}
+	cleanedOrigins := strings.Join(origins, ",")
+	
+	log.Printf("[CORS] Allowed Origins: %s", cleanedOrigins)
 
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: allowedOrigins,
-		AllowHeaders: "Origin,Content-Type,Accept,Authorization",
-		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
+		AllowOrigins:     cleanedOrigins,
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
+		AllowMethods:     "GET, POST, PUT, DELETE, OPTIONS",
 		AllowCredentials: true,
 	}))
 
