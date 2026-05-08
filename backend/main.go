@@ -118,8 +118,9 @@ func adminOnly(c *fiber.Ctx) error {
 	return c.Next()
 }
 
-func main() {
+	log.Println("Starting server initialization...")
 	connectDB()
+	log.Println("Database connection verified.")
 
 	app := fiber.New()
 
@@ -327,5 +328,8 @@ func main() {
 	if port == "" {
 		port = "3000"
 	}
-	log.Fatal(app.Listen(":" + port))
+	
+	address := "0.0.0.0:" + port
+	log.Printf("Server is starting on %s", address)
+	log.Fatal(app.Listen(address))
 }
