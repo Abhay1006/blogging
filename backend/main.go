@@ -119,11 +119,11 @@ func adminOnly(c *fiber.Ctx) error {
 }
 
 func main() {
-	log.Println("Starting server initialization...")
-	connectDB()
-	log.Println("Database connection verified.")
-
-	app := fiber.New()
+	log.Println("[1/4] Starting server initialization...")
+	
+	app := fiber.New(fiber.Config{
+		DisableStartupMessage: false,
+	})
 
 	app.Use(func(c *fiber.Ctx) error {
 		log.Printf("%s %s - Origin: %s", c.Method(), c.Path(), c.Get("Origin"))
@@ -330,12 +330,18 @@ func main() {
 		return c.Status(201).JSON(comment)
 	})
 
+	// --- Server Start ---
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "3000"
+		port = "10000" // Default to Render's preferred port
 	}
 	
 	address := "0.0.0.0:" + port
-	log.Printf("Server is starting on %s", address)
+	
+	log.Println("[2/4] Initializing database connection...")
+	connectDB()
+	log.Println("[3/4] Database connection verified.")
+	
+	log.Printf("[4/4] Server is launching on %s", address)
 	log.Fatal(app.Listen(address))
 }
