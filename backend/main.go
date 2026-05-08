@@ -118,6 +118,7 @@ func adminOnly(c *fiber.Ctx) error {
 	return c.Next()
 }
 
+func main() {
 	log.Println("Starting server initialization...")
 	connectDB()
 	log.Println("Database connection verified.")
