@@ -141,6 +141,11 @@ func adminOnly(c *fiber.Ctx) error {
 		AllowCredentials: true,
 	}))
 
+	// --- Health Check ---
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.SendString("Lumina API is running")
+	})
+
 	// --- Auth Routes ---
 
 	app.Post("/signup", func(c *fiber.Ctx) error {
