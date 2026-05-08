@@ -1,3 +1,4 @@
+import React, { useState } from 'react';
 import { 
   BrowserRouter as Router, 
   Routes, 
@@ -19,7 +20,7 @@ import {
   Avatar,
   Stack
 } from '@mui/material';
-import { ThumbUp, ThumbDown } from '@mui/icons-material';
+import { ThumbUp, ThumbDown, Edit as EditIcon } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 import { Formik, Form } from 'formik';
@@ -27,6 +28,7 @@ import theme from './theme';
 import BlogRenderer from './components/BlogRenderer';
 
 const API_URL = import.meta.env.VITE_API_URL;
+console.log("Connecting to API at:", API_URL);
 
 interface User {
   id: string;
@@ -163,6 +165,7 @@ const PostDetail = () => {
   const userJson = localStorage.getItem('user');
   const currentUser: User | null = userJson ? JSON.parse(userJson) : null;
 
+  const [isEditing, setIsEditing] = useState(false);
   const { data: blog, isLoading } = useQuery<Blog>({
     queryKey: ['blog', id],
     queryFn: async () => {
@@ -221,12 +224,72 @@ const PostDetail = () => {
     }
   });
 
+  const editMutation = useMutation({
+    mutationFn: async (values: { title: string; body: string }) => {
+      await axios.put(`${API_URL}/blogs/${id}`, values, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['blog', id] });
+      setIsEditing(false);
+    },
+  });
+
   if (isLoading) return <Typography>Loading...</Typography>;
   if (!blog) return <Typography>Post not found.</Typography>;
 
+  if (isEditing) {
+    return (
+      <Box sx={{ mt: 4 }}>
+        <Typography variant="h1" sx={{ mb: 4 }}>Edit Post</Typography>
+        <Formik
+          initialValues={{ title: blog.title, body: blog.body }}
+          onSubmit={(values) => editMutation.mutate(values)}
+        >
+          {({ handleChange, values }) => (
+            <Form>
+              <TextField
+                fullWidth
+                label="Title"
+                name="title"
+                value={values.title}
+                onChange={handleChange}
+                sx={{ mb: 3 }}
+              />
+              <TextField
+                fullWidth
+                multiline
+                rows={15}
+                label="Body (Markdown supported)"
+                name="body"
+                value={values.body}
+                onChange={handleChange}
+                sx={{ mb: 3 }}
+              />
+              <Box sx={{ display: 'flex', gap: 2 }}>
+                <Button type="submit" variant="contained" disabled={editMutation.isPending}>
+                  {editMutation.isPending ? 'Saving...' : 'Save Changes'}
+                </Button>
+                <Button onClick={() => setIsEditing(false)} variant="outlined">Cancel</Button>
+              </Box>
+            </Form>
+          )}
+        </Formik>
+      </Box>
+    );
+  }
+
   return (
     <Box sx={{ mt: 4 }}>
-      <Typography variant="h1" sx={{ mb: 1 }}>{blog.title}</Typography>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1 }}>
+        <Typography variant="h1">{blog.title}</Typography>
+        {currentUser?.role === 'admin' && (
+          <Button variant="outlined" startIcon={<EditIcon />} onClick={() => setIsEditing(true)}>
+            Edit
+          </Button>
+        )}
+      </Box>
       <Typography variant="subtitle2" sx={{ mb: 4, fontSize: '1rem' }}>
         {new Date(blog.created_at).toLocaleDateString()} — {blog.author}
       </Typography>
