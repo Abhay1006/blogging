@@ -275,11 +275,33 @@ func main() {
 		blogID, _ := primitive.ObjectIDFromHex(c.Params("id"))
 		userID, _ := primitive.ObjectIDFromHex(c.Locals("user_id").(string))
 
-		// Pull from dislikes, push to likes (atomic)
-		_, err := blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
-			"$pull": bson.M{"dislikes": userID},
-			"$addToSet": bson.M{"likes": userID},
-		})
+		var blog Blog
+		err := blogCollection.FindOne(context.Background(), bson.M{"_id": blogID}).Decode(&blog)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": "Blog not found"})
+		}
+
+		alreadyLiked := false
+		for _, id := range blog.Likes {
+			if id == userID {
+				alreadyLiked = true
+				break
+			}
+		}
+
+		if alreadyLiked {
+			// Toggle off: Unlike
+			_, err = blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
+				"$pull": bson.M{"likes": userID},
+			})
+		} else {
+			// Toggle on: Like (and remove from dislikes)
+			_, err = blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
+				"$pull":     bson.M{"dislikes": userID},
+				"$addToSet": bson.M{"likes": userID},
+			})
+		}
+
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
@@ -290,9 +312,51 @@ func main() {
 		blogID, _ := primitive.ObjectIDFromHex(c.Params("id"))
 		userID, _ := primitive.ObjectIDFromHex(c.Locals("user_id").(string))
 
+		var blog Blog
+		err := blogCollection.FindOne(context.Background(), bson.M{"_id": blogID}).Decode(&blog)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": "Blog not found"})
+		}
+
+		alreadyDisliked := false
+		for _, id := range blog.Dislikes {
+			if id == userID {
+				alreadyDisliked = true
+				break
+			}
+		}
+
+		if alreadyDisliked {
+			// Toggle off: Undislike
+			_, err = blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
+				"$pull": bson.M{"dislikes": userID},
+			})
+		} else {
+			// Toggle on: Dislike (and remove from likes)
+			_, err = blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
+				"$pull":     bson.M{"likes": userID},
+				"$addToSet": bson.M{"dislikes": userID},
+			})
+		}
+
+		if err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		return c.SendStatus(200)
+	})
+
+	app.Put("/blogs/:id", authRequired, adminOnly, func(c *fiber.Ctx) error {
+		blogID, _ := primitive.ObjectIDFromHex(c.Params("id"))
+		updateData := new(Blog)
+		if err := c.BodyParser(updateData); err != nil {
+			return c.Status(400).SendString(err.Error())
+		}
+
 		_, err := blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
-			"$pull": bson.M{"likes": userID},
-			"$addToSet": bson.M{"dislikes": userID},
+			"$set": bson.M{
+				"title": updateData.Title,
+				"body":  updateData.Body,
+			},
 		})
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
