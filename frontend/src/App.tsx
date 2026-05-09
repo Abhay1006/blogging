@@ -94,6 +94,28 @@ const Header = () => {
   );
 };
 
+const stripMarkdown = (text: string) => {
+  return text
+    // 1. Handle LaTeX
+    .replace(/\$\$[\s\S]*?\$\$/g, '')       // Remove block math entirely
+    .replace(/\$([^\$]+)\$/g, '$1')         // Keep inline math content, remove $
+    
+    // 2. User specific: backslashes for breaks
+    .replace(/\\/g, ' ')
+    
+    // 3. Markdown elements
+    .replace(/#+\s+/g, '')                  // Headers
+    .replace(/!\[[^\]]*\]\([^\)]+\)/g, '')   // Images
+    .replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1') // Links (keep text)
+    .replace(/[*_~`]{1,3}/g, '')            // Bold, Italic, Strike, Code
+    .replace(/^\s*>\s+/gm, '')              // Blockquotes
+    
+    // 4. Cleanup whitespace
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
 // --- Pages ---
 
 const PostList = () => {
@@ -140,7 +162,7 @@ const PostList = () => {
             color: 'text.secondary',
             mb: 2
           }}>
-            {blog.body.substring(0, 300)}...
+            {stripMarkdown(blog.body).substring(0, 300)}...
           </Typography>
           <Stack direction="row" spacing={3} sx={{ color: 'text.secondary' }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
