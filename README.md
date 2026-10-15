@@ -9,9 +9,10 @@ Lumina is a sleek, modern, and high-performance blogging platform built with a f
 - **Premium UI/UX**: Designed with a focus on clarity and aesthetics using Material UI and Apple-inspired design tokens.
 - **Admin Dashboard**: Secure admin area for composing and publishing rich-text stories.
 - **Rich Content Rendering**: Full Markdown support including LaTeX math equations and raw HTML rendering.
-- **Real-time Interactions**: Like and dislike system with live count updates on the home page and post details.
-- **Community Engagement**: Nested comment system for readers to share thoughts.
+- **Interactions**: Like and dislike posts; counts are shown on the home page and post details.
+- **Community Engagement**: Comments for readers to share thoughts.
 - **Secure Authentication**: JWT-based authentication with protected routes for administrative actions.
+- **Safe Rendering**: Raw HTML in posts is sanitized before display.
 
 ## 🛠 Tech Stack
 
@@ -42,10 +43,14 @@ No database server is required. The backend creates its SQLite file on first run
    ```bash
    cd backend
    ```
-2. Create a `.env` file based on the environment variables section below.
+2. Copy `.env.example` to `.env` and fill it in (at minimum, set `JWT_SECRET`).
 3. Install dependencies and run:
    ```bash
-   go run main.go
+   go run .
+   ```
+4. Run the tests:
+   ```bash
+   go test ./...
    ```
 
 ### Frontend Setup
@@ -57,25 +62,30 @@ No database server is required. The backend creates its SQLite file on first run
    ```bash
    npm install
    ```
-3. Create a `.env` file with `VITE_API_URL=http://localhost:3000/api`.
+3. Copy `.env.example` to `.env` (it points at `http://localhost:10000/api`).
 4. Run the development server:
    ```bash
    npm run dev
+   ```
+5. Lint and test:
+   ```bash
+   npm run lint
+   npm test
    ```
 
 ## 🔒 Environment Variables
 
 ### Backend (.env)
 See `backend/.env.example`.
+- `JWT_SECRET` (**required**): Secret used to sign login tokens. Use a random string of at least 32 characters (e.g. `openssl rand -hex 32`). The server will not start without it.
 - `DB_PATH`: Path to the SQLite file (default: `lumina.db`, created if missing).
-- `STATIC_DIR`: Directory holding the built frontend. If absent, the server runs API-only.
-- `PORT`: Server port (default: 3000).
-- `JWT_SECRET`: Signing key for auth tokens. **Required in production** -- generate with `openssl rand -hex 32`.
-- `ADMIN_EMAIL`: The email address that will be granted admin privileges upon signup.
-- `ALLOWED_ORIGINS`: CORS whitelist. Only needed for the Vite dev server; production is same-origin.
+- `STATIC_DIR`: Directory holding the built frontend (default: `./public`). If absent, the server runs API-only.
+- `PORT`: Server port (default: `10000`).
+- `ADMIN_EMAIL`: The email address that will be granted admin privileges upon signup. Leave unset for no admin.
+- `ALLOWED_ORIGINS`: Comma-separated CORS whitelist. Only needed for the Vite dev server; production is same-origin.
 
 ### Frontend (.env)
-- `VITE_API_URL`: The base URL for the backend API.
+- `VITE_API_URL`: The base URL for the backend API, including `/api` (e.g. `http://localhost:10000/api`; `/api` in production).
 
 ## 🗄 Data Model
 
