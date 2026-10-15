@@ -1,9 +1,11 @@
 package main
 
 import (
-	"context"
+	"database/sql"
+	"errors"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,78 +13,51 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/crypto/bcrypt"
+
+	"my-blog/backend/internal/store"
 )
 
 type User struct {
-	ID       primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Name     string             `bson:"name" json:"name"`
-	Email    string             `bson:"email" json:"email"`
-	Password string             `bson:"password" json:"-"`
-	Role     string             `bson:"role" json:"role"` // "admin" or "user"
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"-"`
+	Role     string `json:"role"`
 }
 
 type Blog struct {
-	ID        primitive.ObjectID   `bson:"_id,omitempty" json:"id"`
-	Title     string               `bson:"title" json:"title"`
-	Body      string               `bson:"body" json:"body"`
-	Author    string               `bson:"author" json:"author"`
-	Likes     []primitive.ObjectID `bson:"likes" json:"likes"`
-	Dislikes  []primitive.ObjectID `bson:"dislikes" json:"dislikes"`
-	CreatedAt time.Time            `bson:"created_at" json:"created_at"`
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Author    string    `json:"author"`
+	Likes     []string  `json:"likes"`
+	Dislikes  []string  `json:"dislikes"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type Comment struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	BlogID    primitive.ObjectID `bson:"blog_id" json:"blog_id"`
-	UserID    primitive.ObjectID `bson:"user_id" json:"user_id"`
-	UserName  string             `bson:"user_name" json:"user_name"`
-	Content   string             `bson:"content" json:"content"`
-	CreatedAt time.Time          `bson:"created_at" json:"created_at"`
+	ID        string    `json:"id"`
+	BlogID    string    `json:"blog_id"`
+	UserID    string    `json:"user_id"`
+	UserName  string    `json:"user_name"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 var (
-	blogCollection    *mongo.Collection
-	userCollection    *mongo.Collection
-	commentCollection *mongo.Collection
-	jwtSecret         = []byte("secret")
+	db        *sql.DB
+	jwtSecret []byte
 )
 
-func connectDB() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("No .env file found, relying on environment variables")
+func loadJWTSecret() {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		log.Println("[WARN] JWT_SECRET is not set; falling back to a well-known development secret.")
+		log.Println("[WARN] Set JWT_SECRET in .env before exposing this server publicly.")
+		secret = "secret"
 	}
-
-	mongoURI := os.Getenv("MONGO_URI")
-	if mongoURI == "" {
-		mongoURI = "mongodb://localhost:27017"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	err = client.Ping(ctx, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Println("Connected to MongoDB")
-	// Use the database name specified in the connection string if available, otherwise default to "lumina_db"
-	dbName := "lumina_db"
-	db := client.Database(dbName)
-	blogCollection = db.Collection("blogs")
-	userCollection = db.Collection("users")
-	commentCollection = db.Collection("comments")
+	jwtSecret = []byte(secret)
 }
 
 func authRequired(c *fiber.Ctx) error {
@@ -112,54 +87,81 @@ func authRequired(c *fiber.Ctx) error {
 }
 
 func adminOnly(c *fiber.Ctx) error {
-	role := c.Locals("role").(string)
+	role, _ := c.Locals("role").(string)
 	if role != "admin" {
 		return c.Status(403).JSON(fiber.Map{"error": "Admin access required"})
 	}
 	return c.Next()
 }
 
-func main() {
-	log.Println("[1/4] Starting server initialization...")
-	
-	app := fiber.New(fiber.Config{
-		DisableStartupMessage: false,
-	})
-
-	app.Use(func(c *fiber.Ctx) error {
-		log.Printf("%s %s - Origin: %s", c.Method(), c.Path(), c.Get("Origin"))
-		return c.Next()
-	})
-
-	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
-	if allowedOrigins == "" {
-		allowedOrigins = "http://localhost:5173,http://127.0.0.1:5173"
+// blogExists reports whether a blog row is present, so reaction and comment
+// handlers can still answer 404 the way the Mongo version did.
+func blogExists(id string) (bool, error) {
+	var found string
+	err := db.QueryRow("SELECT id FROM blogs WHERE id = ?", id).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	
-	// Clean up the string: remove spaces and trailing slashes from each origin
-	origins := strings.Split(allowedOrigins, ",")
-	for i, origin := range origins {
-		origins[i] = strings.TrimSuffix(strings.TrimSpace(origin), "/")
+	return err == nil, err
+}
+
+// react applies the toggle rules for likes and dislikes. Because a reader has
+// at most one row per blog, switching sides is a single upsert.
+func react(c *fiber.Ctx, kind string) error {
+	blogID := c.Params("id")
+	userID, _ := c.Locals("user_id").(string)
+
+	exists, err := blogExists(blogID)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
 	}
-	cleanedOrigins := strings.Join(origins, ",")
-	
-	log.Printf("[CORS] Allowed Origins: %s", cleanedOrigins)
+	if !exists {
+		return c.Status(404).JSON(fiber.Map{"error": "Blog not found"})
+	}
 
-	app.Use(cors.New(cors.Config{
-		AllowOrigins:     cleanedOrigins,
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
-		AllowMethods:     "GET, POST, PUT, DELETE, OPTIONS",
-		AllowCredentials: true,
-	}))
+	var current string
+	err = db.QueryRow(
+		"SELECT kind FROM reactions WHERE blog_id = ? AND user_id = ?",
+		blogID, userID,
+	).Scan(&current)
 
-	// --- Health Check ---
-	app.Get("/", func(c *fiber.Ctx) error {
-		return c.SendString("Lumina API is running")
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// No reaction yet: record this one.
+		_, err = db.Exec(
+			"INSERT INTO reactions (blog_id, user_id, kind) VALUES (?, ?, ?)",
+			blogID, userID, kind,
+		)
+	case err != nil:
+		return c.Status(500).SendString(err.Error())
+	case current == kind:
+		// Same button pressed twice: toggle it off.
+		_, err = db.Exec(
+			"DELETE FROM reactions WHERE blog_id = ? AND user_id = ?",
+			blogID, userID,
+		)
+	default:
+		// Switching from like to dislike or back.
+		_, err = db.Exec(
+			"UPDATE reactions SET kind = ? WHERE blog_id = ? AND user_id = ?",
+			kind, blogID, userID,
+		)
+	}
+
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	return c.SendStatus(200)
+}
+
+func registerRoutes(api fiber.Router) {
+	api.Get("/health", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"status": "ok", "database": "sqlite"})
 	})
 
-	// --- Auth Routes ---
+	// --- Auth ---
 
-	app.Post("/signup", func(c *fiber.Ctx) error {
+	api.Post("/signup", func(c *fiber.Ctx) error {
 		type SignupRequest struct {
 			Name     string `json:"name"`
 			Email    string `json:"email"`
@@ -170,29 +172,37 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
 		}
 
-		var existingUser User
-		err := userCollection.FindOne(context.Background(), bson.M{"email": req.Email}).Decode(&existingUser)
+		var existing string
+		err := db.QueryRow("SELECT id FROM users WHERE email = ?", req.Email).Scan(&existing)
 		if err == nil {
 			return c.Status(400).JSON(fiber.Map{"error": "User already exists"})
 		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return c.Status(500).JSON(fiber.Map{"error": "Could not create user"})
+		}
 
-		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), 10)
-		
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), 10)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Could not create user"})
+		}
+
 		role := "user"
-		// Simple logic: if email is admin@lumina.com, make them admin
 		if req.Email == os.Getenv("ADMIN_EMAIL") {
 			role = "admin"
 		}
 
 		user := User{
-			ID:       primitive.NewObjectID(),
+			ID:       store.NewID(),
 			Name:     req.Name,
 			Email:    req.Email,
 			Password: string(hashedPassword),
 			Role:     role,
 		}
 
-		_, err = userCollection.InsertOne(context.Background(), user)
+		_, err = db.Exec(
+			"INSERT INTO users (id, name, email, password, role) VALUES (?, ?, ?, ?, ?)",
+			user.ID, user.Name, user.Email, user.Password, user.Role,
+		)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Could not create user"})
 		}
@@ -200,7 +210,7 @@ func main() {
 		return c.Status(201).JSON(fiber.Map{"message": "User created"})
 	})
 
-	app.Post("/login", func(c *fiber.Ctx) error {
+	api.Post("/login", func(c *fiber.Ctx) error {
 		type LoginRequest struct {
 			Email    string `json:"email"`
 			Password string `json:"password"`
@@ -211,7 +221,10 @@ func main() {
 		}
 
 		var user User
-		err := userCollection.FindOne(context.Background(), bson.M{"email": req.Email}).Decode(&user)
+		err := db.QueryRow(
+			"SELECT id, name, email, password, role FROM users WHERE email = ?",
+			req.Email,
+		).Scan(&user.ID, &user.Name, &user.Email, &user.Password, &user.Role)
 		if err != nil {
 			return c.Status(401).JSON(fiber.Map{"error": "Invalid credentials"})
 		}
@@ -221,164 +234,162 @@ func main() {
 		}
 
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"user_id": user.ID.Hex(),
+			"user_id": user.ID,
 			"role":    user.Role,
 			"name":    user.Name,
 			"exp":     time.Now().Add(time.Hour * 72).Unix(),
 		})
 
-		t, _ := token.SignedString(jwtSecret)
+		t, err := token.SignedString(jwtSecret)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Could not issue token"})
+		}
 		return c.JSON(fiber.Map{"token": t, "user": user})
 	})
 
-	// --- Blog Routes ---
+	// --- Blogs ---
 
-	app.Get("/blogs", func(c *fiber.Ctx) error {
-		cursor, err := blogCollection.Find(context.Background(), bson.M{}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	api.Get("/blogs", func(c *fiber.Ctx) error {
+		rows, err := db.Query(
+			"SELECT id, title, body, author, created_at FROM blogs ORDER BY created_at DESC",
+		)
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
-		var blogs []Blog
-		cursor.All(context.Background(), &blogs)
+		defer rows.Close()
+
+		blogs := []Blog{}
+		ids := []string{}
+		for rows.Next() {
+			var b Blog
+			var created string
+			if err := rows.Scan(&b.ID, &b.Title, &b.Body, &b.Author, &created); err != nil {
+				return c.Status(500).SendString(err.Error())
+			}
+			b.CreatedAt = store.ParseTime(created)
+			blogs = append(blogs, b)
+			ids = append(ids, b.ID)
+		}
+		if err := rows.Err(); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+
+		likes, dislikes, err := reactionsFor(ids)
+		if err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		for i := range blogs {
+			blogs[i].Likes = orEmpty(likes[blogs[i].ID])
+			blogs[i].Dislikes = orEmpty(dislikes[blogs[i].ID])
+		}
+
 		return c.JSON(blogs)
 	})
 
-	app.Get("/blogs/:id", func(c *fiber.Ctx) error {
-		id, _ := primitive.ObjectIDFromHex(c.Params("id"))
-		var blog Blog
-		err := blogCollection.FindOne(context.Background(), bson.M{"_id": id}).Decode(&blog)
+	api.Get("/blogs/:id", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		var b Blog
+		var created string
+		err := db.QueryRow(
+			"SELECT id, title, body, author, created_at FROM blogs WHERE id = ?", id,
+		).Scan(&b.ID, &b.Title, &b.Body, &b.Author, &created)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": "Not found"})
 		}
-		return c.JSON(blog)
+		b.CreatedAt = store.ParseTime(created)
+
+		likes, dislikes, err := reactionsFor([]string{id})
+		if err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		b.Likes = orEmpty(likes[id])
+		b.Dislikes = orEmpty(dislikes[id])
+
+		return c.JSON(b)
 	})
 
-	app.Post("/blogs", authRequired, adminOnly, func(c *fiber.Ctx) error {
+	api.Post("/blogs", authRequired, adminOnly, func(c *fiber.Ctx) error {
 		blog := new(Blog)
 		if err := c.BodyParser(blog); err != nil {
 			return c.Status(400).SendString(err.Error())
 		}
-		blog.ID = primitive.NewObjectID()
-		blog.CreatedAt = time.Now()
-		blog.Likes = []primitive.ObjectID{}
-		blog.Dislikes = []primitive.ObjectID{}
-		_, err := blogCollection.InsertOne(context.Background(), blog)
+
+		blog.ID = store.NewID()
+		blog.CreatedAt = time.Now().UTC()
+		blog.Likes = []string{}
+		blog.Dislikes = []string{}
+
+		_, err := db.Exec(
+			"INSERT INTO blogs (id, title, body, author, created_at) VALUES (?, ?, ?, ?, ?)",
+			blog.ID, blog.Title, blog.Body, blog.Author, blog.CreatedAt.Format(store.TimeFormat),
+		)
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
+
 		return c.Status(201).JSON(blog)
 	})
 
-	// --- Interaction Routes ---
-
-	app.Post("/blogs/:id/like", authRequired, func(c *fiber.Ctx) error {
-		blogID, _ := primitive.ObjectIDFromHex(c.Params("id"))
-		userID, _ := primitive.ObjectIDFromHex(c.Locals("user_id").(string))
-
-		var blog Blog
-		err := blogCollection.FindOne(context.Background(), bson.M{"_id": blogID}).Decode(&blog)
-		if err != nil {
-			return c.Status(404).JSON(fiber.Map{"error": "Blog not found"})
-		}
-
-		alreadyLiked := false
-		for _, id := range blog.Likes {
-			if id == userID {
-				alreadyLiked = true
-				break
-			}
-		}
-
-		if alreadyLiked {
-			// Toggle off: Unlike
-			_, err = blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
-				"$pull": bson.M{"likes": userID},
-			})
-		} else {
-			// Toggle on: Like (and remove from dislikes)
-			_, err = blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
-				"$pull":     bson.M{"dislikes": userID},
-				"$addToSet": bson.M{"likes": userID},
-			})
-		}
-
-		if err != nil {
-			return c.Status(500).SendString(err.Error())
-		}
-		return c.SendStatus(200)
-	})
-
-	app.Post("/blogs/:id/dislike", authRequired, func(c *fiber.Ctx) error {
-		blogID, _ := primitive.ObjectIDFromHex(c.Params("id"))
-		userID, _ := primitive.ObjectIDFromHex(c.Locals("user_id").(string))
-
-		var blog Blog
-		err := blogCollection.FindOne(context.Background(), bson.M{"_id": blogID}).Decode(&blog)
-		if err != nil {
-			return c.Status(404).JSON(fiber.Map{"error": "Blog not found"})
-		}
-
-		alreadyDisliked := false
-		for _, id := range blog.Dislikes {
-			if id == userID {
-				alreadyDisliked = true
-				break
-			}
-		}
-
-		if alreadyDisliked {
-			// Toggle off: Undislike
-			_, err = blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
-				"$pull": bson.M{"dislikes": userID},
-			})
-		} else {
-			// Toggle on: Dislike (and remove from likes)
-			_, err = blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
-				"$pull":     bson.M{"likes": userID},
-				"$addToSet": bson.M{"dislikes": userID},
-			})
-		}
-
-		if err != nil {
-			return c.Status(500).SendString(err.Error())
-		}
-		return c.SendStatus(200)
-	})
-
-	app.Put("/blogs/:id", authRequired, adminOnly, func(c *fiber.Ctx) error {
-		blogID, _ := primitive.ObjectIDFromHex(c.Params("id"))
+	api.Put("/blogs/:id", authRequired, adminOnly, func(c *fiber.Ctx) error {
 		updateData := new(Blog)
 		if err := c.BodyParser(updateData); err != nil {
 			return c.Status(400).SendString(err.Error())
 		}
 
-		_, err := blogCollection.UpdateOne(context.Background(), bson.M{"_id": blogID}, bson.M{
-			"$set": bson.M{
-				"title": updateData.Title,
-				"body":  updateData.Body,
-			},
-		})
+		_, err := db.Exec(
+			"UPDATE blogs SET title = ?, body = ? WHERE id = ?",
+			updateData.Title, updateData.Body, c.Params("id"),
+		)
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 		return c.SendStatus(200)
 	})
 
-	app.Get("/blogs/:id/comments", func(c *fiber.Ctx) error {
-		blogID, _ := primitive.ObjectIDFromHex(c.Params("id"))
-		cursor, err := commentCollection.Find(context.Background(), bson.M{"blog_id": blogID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
+	// --- Interactions ---
+
+	api.Post("/blogs/:id/like", authRequired, func(c *fiber.Ctx) error {
+		return react(c, "like")
+	})
+
+	api.Post("/blogs/:id/dislike", authRequired, func(c *fiber.Ctx) error {
+		return react(c, "dislike")
+	})
+
+	// --- Comments ---
+
+	api.Get("/blogs/:id/comments", func(c *fiber.Ctx) error {
+		rows, err := db.Query(
+			"SELECT id, blog_id, user_id, user_name, content, created_at FROM comments WHERE blog_id = ? ORDER BY created_at ASC",
+			c.Params("id"),
+		)
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
-		var comments []Comment
-		cursor.All(context.Background(), &comments)
+		defer rows.Close()
+
+		comments := []Comment{}
+		for rows.Next() {
+			var cm Comment
+			var created string
+			if err := rows.Scan(&cm.ID, &cm.BlogID, &cm.UserID, &cm.UserName, &cm.Content, &created); err != nil {
+				return c.Status(500).SendString(err.Error())
+			}
+			cm.CreatedAt = store.ParseTime(created)
+			comments = append(comments, cm)
+		}
+		if err := rows.Err(); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+
 		return c.JSON(comments)
 	})
 
-	app.Post("/blogs/:id/comments", authRequired, func(c *fiber.Ctx) error {
-		blogID, _ := primitive.ObjectIDFromHex(c.Params("id"))
-		userID, _ := primitive.ObjectIDFromHex(c.Locals("user_id").(string))
-		userName := c.Locals("name").(string)
+	api.Post("/blogs/:id/comments", authRequired, func(c *fiber.Ctx) error {
+		blogID := c.Params("id")
+		userID, _ := c.Locals("user_id").(string)
+		userName, _ := c.Locals("name").(string)
 
 		type CommentReq struct {
 			Content string `json:"content"`
@@ -388,34 +399,128 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
 		}
 
+		exists, err := blogExists(blogID)
+		if err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		if !exists {
+			return c.Status(404).JSON(fiber.Map{"error": "Blog not found"})
+		}
+
 		comment := Comment{
-			ID:        primitive.NewObjectID(),
+			ID:        store.NewID(),
 			BlogID:    blogID,
 			UserID:    userID,
 			UserName:  userName,
 			Content:   req.Content,
-			CreatedAt: time.Now(),
+			CreatedAt: time.Now().UTC(),
 		}
 
-		_, err := commentCollection.InsertOne(context.Background(), comment)
+		_, err = db.Exec(
+			"INSERT INTO comments (id, blog_id, user_id, user_name, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			comment.ID, comment.BlogID, comment.UserID, comment.UserName,
+			comment.Content, comment.CreatedAt.Format(store.TimeFormat),
+		)
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
+
 		return c.Status(201).JSON(comment)
 	})
+}
 
-	// --- Server Start ---
+func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, relying on environment variables")
+	}
+
+	loadJWTSecret()
+
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "lumina.db"
+	}
+
+	log.Printf("[1/3] Opening local database at %s", dbPath)
+	var err error
+	db, err = store.Open(dbPath)
+	if err != nil {
+		log.Fatalf("could not open database: %v", err)
+	}
+	defer db.Close()
+	log.Println("[2/3] Database ready.")
+
+	app := fiber.New(fiber.Config{DisableStartupMessage: false})
+
+	app.Use(func(c *fiber.Ctx) error {
+		log.Printf("%s %s", c.Method(), c.Path())
+		return c.Next()
+	})
+
+	// The frontend is served from this same origin in production, so CORS only
+	// matters for the Vite dev server.
+	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
+	if allowedOrigins == "" {
+		allowedOrigins = "http://localhost:5173,http://127.0.0.1:5173"
+	}
+	origins := strings.Split(allowedOrigins, ",")
+	for i, origin := range origins {
+		origins[i] = strings.TrimSuffix(strings.TrimSpace(origin), "/")
+	}
+	cleanedOrigins := strings.Join(origins, ",")
+	log.Printf("[CORS] Allowed Origins: %s", cleanedOrigins)
+
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     cleanedOrigins,
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
+		AllowMethods:     "GET, POST, PUT, DELETE, OPTIONS",
+		AllowCredentials: true,
+	}))
+
+	// The API lives under /api so it cannot collide with the client-side
+	// routes (/login, /signup) served by the single-page app below.
+	registerRoutes(app.Group("/api"))
+
+	// Serve the built frontend, when it has been deployed alongside the binary.
+	staticDir := os.Getenv("STATIC_DIR")
+	if staticDir == "" {
+		staticDir = "./public"
+	}
+	if _, err := os.Stat(filepath.Join(staticDir, "index.html")); err == nil {
+		log.Printf("[static] Serving frontend from %s", staticDir)
+		// The shell must never be cached: a stale copy references hashed bundles
+		// that a later deploy has deleted, and the page renders blank.
+		sendShell := func(c *fiber.Ctx) error {
+			c.Set(fiber.HeaderCacheControl, "no-cache")
+			return c.SendFile(filepath.Join(staticDir, "index.html"))
+		}
+		app.Get("/", sendShell)
+		app.Get("/index.html", sendShell)
+
+		// Hashed bundles never change, so they can be cached indefinitely.
+		app.Static("/assets", filepath.Join(staticDir, "assets"), fiber.Static{Compress: true, MaxAge: 31536000})
+		// A missing bundle is a real 404. Answering with the HTML shell instead
+		// makes the browser reject it as a script and leaves a white screen.
+		app.Get("/assets/*", func(c *fiber.Ctx) error {
+			return c.SendStatus(fiber.StatusNotFound)
+		})
+		app.Static("/", staticDir, fiber.Static{Compress: true, MaxAge: 3600})
+
+		// Any unmatched GET is a client-side route: hand back the SPA shell.
+		app.Get("/*", sendShell)
+	} else {
+		log.Printf("[static] No frontend build at %s; serving API only", staticDir)
+		app.Get("/", func(c *fiber.Ctx) error {
+			return c.SendString("Lumina API is running")
+		})
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "10000" // Default to Render's preferred port
+		port = "3000"
 	}
-	
 	address := "0.0.0.0:" + port
-	
-	log.Println("[2/4] Initializing database connection...")
-	connectDB()
-	log.Println("[3/4] Database connection verified.")
-	
-	log.Printf("[4/4] Server is launching on %s", address)
+
+	log.Printf("[3/3] Server is launching on %s", address)
 	log.Fatal(app.Listen(address))
 }

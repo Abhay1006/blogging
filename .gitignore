@@ -40,3 +40,9 @@ server
 /backend/check_users.go
 /backend/cleanup_users.go
 /backend/scratch_oid.go
+
+# Local SQLite database (and WAL sidecars)
+*.db
+*.db-shm
+*.db-wal
+.deploy-cache/
