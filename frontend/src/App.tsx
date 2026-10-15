@@ -56,12 +56,25 @@ interface Comment {
   created_at: string;
 }
 
+// A corrupt or stale "user" entry must not take the whole app down, so a
+// value that fails to parse is treated as logged out and cleared.
+const getStoredUser = (): User | null => {
+  const userJson = localStorage.getItem('user');
+  if (!userJson) return null;
+  try {
+    return JSON.parse(userJson);
+  } catch {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    return null;
+  }
+};
+
 // --- Header ---
 
 const Header = () => {
   const navigate = useNavigate();
-  const userJson = localStorage.getItem('user');
-  const user: User | null = userJson ? JSON.parse(userJson) : null;
+  const user = getStoredUser();
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -184,8 +197,7 @@ const PostDetail = () => {
   const { id } = useParams();
   const queryClient = useQueryClient();
   const token = localStorage.getItem('token');
-  const userJson = localStorage.getItem('user');
-  const currentUser: User | null = userJson ? JSON.parse(userJson) : null;
+  const currentUser = getStoredUser();
 
   const [isEditing, setIsEditing] = useState(false);
   const { data: blog, isLoading } = useQuery<Blog>({
@@ -378,7 +390,7 @@ const PostDetail = () => {
         {comments?.map((c) => (
           <Box key={c.id}>
             <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 1 }}>
-              <Avatar sx={{ width: 32, height: 32, fontSize: '0.8rem' }}>{c.user_name[0]}</Avatar>
+              <Avatar sx={{ width: 32, height: 32, fontSize: '0.8rem' }}>{c.user_name?.[0]}</Avatar>
               <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>{c.user_name}</Typography>
               <Typography variant="caption" color="text.secondary">{new Date(c.created_at).toLocaleDateString()}</Typography>
             </Stack>
@@ -444,8 +456,7 @@ const ComposePost = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const token = localStorage.getItem('token');
-  const userJson = localStorage.getItem('user');
-  const user: User | null = userJson ? JSON.parse(userJson) : null;
+  const user = getStoredUser();
 
   const mutation = useMutation({
     mutationFn: (newBlog: Partial<Blog>) => {
