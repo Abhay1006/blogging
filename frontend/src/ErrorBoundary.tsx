@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from 'react';
+import { clearSession } from './auth/storage';
 
 // Without a boundary, any render error unmounts the whole tree and leaves a
 // blank white page. This shows a way out instead.
@@ -14,8 +15,7 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, { 
   }
 
   reset = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    clearSession();
     window.location.href = '/';
   };
 
