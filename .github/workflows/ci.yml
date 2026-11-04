@@ -4,6 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch: # re-publish the tablet build of main by hand
+
+# A newer push to the same branch cancels the older run, so an older run can
+# never finish last and publish an older build over a newer one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   backend:
@@ -39,3 +49,77 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+  scripts:
+    name: Deploy scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck deploy.sh scripts/*.sh backend/scripts/*.sh
+
+  # Continuous delivery for the Termux tablet. Once a commit on main passes
+  # every check, build the arm64 bundle and publish it as the `tablet-deploy`
+  # release. The tablet runs backend/scripts/tab-deploy.sh, which watches that
+  # release, so it only ever installs commits that passed CI. Nothing is built
+  # on the tablet itself. See docs/TAB-DEPLOY.md.
+  publish-tablet:
+    name: Publish tablet build
+    needs: [backend, frontend, scripts]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+
+      - name: Build bundle
+        run: scripts/build-bundle.sh "$RUNNER_TEMP/tablet"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumina-arm64
+          path: ${{ runner.temp }}/tablet
+          retention-days: 14
+
+      - name: Publish the tablet-deploy release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ runner.temp }}/tablet
+        run: |
+          git tag -f tablet-deploy "$GITHUB_SHA"
+          git push -f origin refs/tags/tablet-deploy
+
+          subject="$(git log -1 --format=%s)"
+          notes="Built by CI from ${GITHUB_SHA} (${subject}). The tablet installs this automatically; see docs/TAB-DEPLOY.md."
+          if gh release view tablet-deploy >/dev/null 2>&1; then
+            gh release edit tablet-deploy --prerelease --notes "$notes"
+          else
+            gh release create tablet-deploy --prerelease --verify-tag \
+              --title "Tablet build (rolling)" --notes "$notes"
+          fi
+
+          # VERSION goes last: the tablet acts when VERSION changes and checks
+          # that the bundle it downloads matches it, so a check that lands
+          # mid-upload just retries.
+          gh release upload tablet-deploy "$OUT/lumina-arm64.tar.gz" "$OUT/lumina-arm64.tar.gz.sha256" --clobber
+          gh release upload tablet-deploy "$OUT/VERSION" --clobber
+
+          {
+            echo "### Tablet build published"
+            echo
+            echo "\`$(head -n 1 "$OUT/VERSION")\` — ${subject}"
+            echo
+            echo "The tablet picks it up on its next check (within 60s by default)."
+          } >>"$GITHUB_STEP_SUMMARY"
