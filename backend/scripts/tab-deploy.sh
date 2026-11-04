@@ -10,13 +10,15 @@
 #   1. downloads the bundle and verifies its checksum,
 #   2. stops the server and snapshots lumina.db,
 #   3. swaps in the new binary, frontend and scripts,
-#   4. starts the server and waits for /api/health to answer,
-#   5. puts the previous version back if it does not.
+#   4. starts the server and waits for /api/health and the frontend to answer,
+#   5. puts the previous version back if they do not.
 #
 # Usage:
 #   ~/lumina/tab-deploy.sh            deploy once if there is a new release
 #   ~/lumina/tab-deploy.sh watch [s]  check every s seconds (default 60), forever
 #   ~/lumina/tab-deploy.sh restart    restart the server without deploying
+#   ~/lumina/tab-deploy.sh rollback   go back to the version before the last
+#                                     deploy (run it again to undo)
 #   ~/lumina/tab-deploy.sh status     show the deployed build and what runs
 #
 # Settings (environment variables, or ~/lumina/.deploy/env; all optional):
@@ -24,6 +26,11 @@
 #                   (default https://github.com/Abhay1006/blogging/releases/download/tablet-deploy)
 #   HEALTH_TIMEOUT  seconds to wait for the server  (default 60)
 #   PORT            port to health-check            (default: PORT in .env, else 3500)
+#   NOTIFY_CMD      shell command run after a deploy, a rollback or a failure,
+#                   with DEPLOY_EVENT (deployed, rolled-back, rollback-failed,
+#                   manual-rollback) and DEPLOY_MESSAGE in its environment.
+#                   See docs/TAB-DEPLOY.md for termux-notification and ntfy.
+#   LOG_MAX_BYTES   size at which a log in logs/ is rotated to .1  (default 5 MB)
 #
 # See docs/TAB-DEPLOY.md for the one-time setup.
 
@@ -39,6 +46,8 @@ mkdir -p "$STATE" "$DIR/logs"
 
 DEPLOY_URL="${DEPLOY_URL:-https://github.com/Abhay1006/blogging/releases/download/tablet-deploy}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
+NOTIFY_CMD="${NOTIFY_CMD:-}"
+LOG_MAX_BYTES="${LOG_MAX_BYTES:-5242880}"
 METRICS="127.0.0.1:20250" # identifies the blog's tunnel; see start.sh
 ASSET="lumina-arm64.tar.gz"
 
@@ -48,11 +57,33 @@ LAST_RELEASE="$STATE/last-release" # release sha last handled, deployed or not
 FAILED="$STATE/failed"             # release sha that failed and was rolled back
 LOCK="$STATE/lock"
 WATCHER_PID="$STATE/watcher.pid" # pid of `watch`; exec keeps it across self-updates
+OFFLINE="$STATE/offline"         # present while the release cannot be fetched
 LOG="$DIR/logs/deploy.log"
 SERVER="$DIR/lumina-server"
 
 log() {
 	printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG"
+}
+
+# Runs NOTIFY_CMD, if set. The timeout matters: termux-notification hangs
+# when the Termux:API app is not installed.
+notify() {
+	[ -n "$NOTIFY_CMD" ] || return 0
+	DEPLOY_EVENT="$1" DEPLOY_MESSAGE="$2" timeout 30 bash -c "$NOTIFY_CMD" >>"$LOG" 2>&1 ||
+		log "NOTIFY_CMD failed (exit $?)"
+}
+
+# Keeps each log under LOG_MAX_BYTES, with one older copy in .1. Copy and
+# truncate rather than rename: the server and the tunnel keep their log files
+# open in append mode, so they carry on writing at the start of the new file.
+rotate_logs() {
+	local f
+	for f in "$DIR"/logs/*.log; do
+		[ -f "$f" ] || continue
+		if [ "$(wc -c <"$f")" -gt "$LOG_MAX_BYTES" ]; then
+			cp "$f" "$f.1" && : >"$f"
+		fi
+	done
 }
 
 port() {
@@ -69,8 +100,13 @@ port() {
 
 server_running() { pgrep -f "$SERVER" >/dev/null 2>&1; }
 
+# Both the API and the frontend: a bundle with a broken public/ still answers
+# /api/health.
 healthy() {
-	curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$(port)/api/health" 2>/dev/null
+	local base
+	base="http://127.0.0.1:$(port)"
+	curl -fsS -o /dev/null --max-time 5 "$base/api/health" 2>/dev/null &&
+		curl -fsS -o /dev/null --max-time 5 "$base/" 2>/dev/null
 }
 
 # Stops only the server. stop.sh would also take down the blog's tunnel, which
@@ -111,7 +147,7 @@ restart_server() {
 		log "server is up on port $(port)"
 		return 0
 	fi
-	log "ERROR: server did not answer /api/health within ${HEALTH_TIMEOUT}s (see logs/server.log)"
+	log "ERROR: server did not answer within ${HEALTH_TIMEOUT}s (see logs/server.log)"
 	return 1
 }
 
@@ -151,10 +187,19 @@ install_from() {
 
 deploy_once() {
 	local want
-	if ! fetch VERSION "$STATE/release-version" 2>>"$LOG"; then
-		log "could not fetch the release (offline, or CI has not published one yet)"
+	rotate_logs
+	if ! fetch VERSION "$STATE/release-version" 2>/dev/null; then
+		# Logged once, not on every check: the tablet can be offline for hours.
+		if [ ! -f "$OFFLINE" ]; then
+			log "could not fetch the release (offline, or CI has not published one yet); will keep trying"
+			touch "$OFFLINE"
+		fi
 		ensure_running
 		return 0
+	fi
+	if [ -f "$OFFLINE" ]; then
+		rm -f "$OFFLINE"
+		log "the release is reachable again"
 	fi
 	want="$(head -n 1 "$STATE/release-version")"
 
@@ -221,6 +266,7 @@ deploy_once() {
 	if wait_healthy; then
 		rm -f "$FAILED"
 		log "deployed $short; server is up on port $(port)"
+		notify deployed "Lumina: deployed $short ($(sed -n 2p VERSION))"
 		return 0
 	fi
 
@@ -232,13 +278,67 @@ deploy_once() {
 		start_all
 		if wait_healthy; then
 			log "rolled back; $short will be skipped until CI publishes a newer build"
+			notify rolled-back "Lumina: $short failed its health check and was rolled back"
 		else
 			log "ERROR: rollback failed too; the server may be down. Check logs/server.log"
+			notify rollback-failed "Lumina: $short failed and so did the rollback; the blog may be down"
 		fi
 	else
 		log "ERROR: there was no previous version to roll back to"
+		notify rollback-failed "Lumina: $short failed and there was no previous version; the blog may be down"
 	fi
 	log "a copy of the database from before the deploy is in $PREVIOUS"
+	return 1
+}
+
+# Puts back the version that ran before the last deploy, for a build that
+# passed its health check but is broken in use. The two versions swap places,
+# so running it again returns to the newer one. The release stays marked as
+# handled, so the watcher does not reinstall it; the next build CI publishes
+# deploys as usual.
+rollback() {
+	if [ ! -e "$PREVIOUS/lumina-server" ]; then
+		log "ERROR: there is no previous version in $PREVIOUS to roll back to"
+		return 1
+	fi
+	local from to swap="$STATE/swap" f
+	from="$(sed -n 1p VERSION 2>/dev/null)"
+	to="$(sed -n 1p "$PREVIOUS/VERSION" 2>/dev/null)"
+	log "rolling back from ${from:0:12} to ${to:0:12}"
+	stop_server
+
+	rm -rf "$swap"
+	mkdir -p "$swap"
+	[ -e "$SERVER" ] && mv "$SERVER" "$swap/"
+	[ -d "$DIR/public" ] && mv "$DIR/public" "$swap/"
+	cp -p "$DIR"/*.sh "$swap/" 2>/dev/null
+	[ -f "$DIR/VERSION" ] && mv "$DIR/VERSION" "$swap/"
+	# Only the binary and the frontend go back. The device scripts stay current,
+	# so an older tab-deploy.sh without `rollback` can never strand the undo.
+	rm -f "$PREVIOUS"/*.sh
+	install_from "$PREVIOUS"
+	# The database copy from before the last deploy stays with the old files.
+	for f in "$PREVIOUS"/lumina.db*; do
+		[ -e "$f" ] && mv "$f" "$swap/"
+	done
+	rm -rf "$PREVIOUS"
+	mv "$swap" "$PREVIOUS"
+
+	# Undoing a rollback clears the mark; otherwise mark what was left behind.
+	if [ -n "$to" ] && [ "$to" = "$(cat "$FAILED" 2>/dev/null)" ]; then
+		rm -f "$FAILED"
+	elif [ -n "$from" ]; then
+		echo "$from" >"$FAILED"
+	fi
+
+	start_all
+	if wait_healthy; then
+		log "rolled back to ${to:0:12}; 'tab-deploy.sh rollback' again returns to ${from:0:12}"
+		notify manual-rollback "Lumina: rolled back from ${from:0:12} to ${to:0:12}"
+		return 0
+	fi
+	log "ERROR: ${to:0:12} did not answer within ${HEALTH_TIMEOUT}s either (see logs/server.log)"
+	notify rollback-failed "Lumina: manual rollback to ${to:0:12} did not come up"
 	return 1
 }
 
@@ -285,7 +385,9 @@ watch() {
 
 status() {
 	echo "deployed:  $(sed -n 1p VERSION 2>/dev/null | cut -c1-12) $(sed -n 2p VERSION 2>/dev/null)"
-	[ -f "$FAILED" ] && echo "skipping:  $(cut -c1-12 "$FAILED") (failed its health check)"
+	[ -f "$FAILED" ] && echo "skipping:  $(cut -c1-12 "$FAILED") (failed its health check, or rolled back)"
+	[ -f "$PREVIOUS/VERSION" ] && echo "previous:  $(sed -n 1p "$PREVIOUS/VERSION" | cut -c1-12) $(sed -n 2p "$PREVIOUS/VERSION") ('rollback' returns to it)"
+	[ -f "$OFFLINE" ] && echo "release:   NOT reachable since $(date -r "$OFFLINE" '+%Y-%m-%d %H:%M')"
 	printf 'server:    '
 	if healthy; then echo "healthy on port $(port)"; elif server_running; then echo "running, NOT answering"; else echo "stopped"; fi
 	printf 'tunnel:    '
@@ -306,6 +408,7 @@ case "${1:-once}" in
 once) locked deploy_once ;;
 watch) watch "${2:-60}" ;;
 restart) locked restart_server ;;
+rollback) locked rollback ;;
 status) status ;;
 *)
 	sed -n '/^# Usage/,/^# Settings/p' "$0" | sed '$d; s/^# \{0,1\}//'

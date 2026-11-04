@@ -7,10 +7,11 @@ it:
 ```
 PC                  GitHub Actions                                 Tablet
 git push ──► main ──► CI: gofmt, vet, Go tests, lint, vitest,
-                      frontend build, shellcheck
+                      frontend build, shellcheck,
+                      arm64 bundle built + booted under qemu
                          │ all green
                          ▼
-                      build arm64 bundle ──► `tablet-deploy` release ◄── tab-deploy.sh watch
+                      publish that bundle ──► `tablet-deploy` release ◄── tab-deploy.sh watch
                                                                          (checks every 60s)
                                                                          download → verify
                                                                          → swap → restart
@@ -19,10 +20,13 @@ git push ──► main ──► CI: gofmt, vet, Go tests, lint, vitest,
 ```
 
 - **CI** (`.github/workflows/ci.yml`) runs on every push and pull request.
-  When a push to `main` passes every check, the `publish-tablet` job builds
-  the arm64 bundle with `scripts/build-bundle.sh` and uploads it to the
-  rolling `tablet-deploy` release (a prerelease, so it never shows as
-  "Latest"). A commit that fails CI is never published.
+  The `bundle` job builds the arm64 bundle with `scripts/build-bundle.sh` and
+  smoke-tests it with `scripts/smoke-bundle.sh`, which boots the binary under
+  qemu and checks the API, the frontend, a client-side route, and that the
+  frontend calls the API at `/api`. When a push to `main` passes every job,
+  `publish-tablet` uploads that same tested bundle to the rolling
+  `tablet-deploy` release (a prerelease, so it never shows as "Latest"). A
+  commit that fails CI is never published.
 - **CD** (`~/lumina/tab-deploy.sh`, from `backend/scripts/`) runs on the
   tablet and watches that release. The tablet pulls from GitHub, so it needs
   no inbound SSH, webhook or open port, and does not depend on the SSH tunnel
@@ -44,7 +48,8 @@ has (see the README's "Why the build is the shape it is").
 3. Stops the server (not the tunnel), and copies the current binary, frontend,
    scripts and `lumina.db` into `.deploy/previous/`.
 4. Moves the new `lumina-server`, `public/` and scripts into `~/lumina/`.
-5. Starts the server and waits up to 60 seconds for `/api/health`.
+5. Starts the server and waits up to 60 seconds for `/api/health` and the
+   frontend (`/`) to answer.
 6. If that fails, puts the previous binary, frontend and scripts back, starts
    them, and skips the bad build until CI publishes a newer one. The database
    is **not** restored automatically; the copy from step 3 stays in
@@ -126,15 +131,56 @@ build. On the tablet: `tail -f ~/lumina/logs/deploy.log`.
 | `~/lumina/tab-deploy.sh watch [seconds]`    | Do that forever, every 60 seconds by default                    |
 | `~/lumina/tab-deploy.sh status`             | Deployed build, skipped build, server, tunnel and watcher state |
 | `~/lumina/tab-deploy.sh restart`            | Restart the server without deploying (e.g. after editing .env)  |
+| `~/lumina/tab-deploy.sh rollback`           | Go back to the version before the last deploy; again to undo    |
 | `~/lumina/stop.sh` / `start.sh` / `status.sh` | Unchanged                                                     |
 
 Optional settings, as environment variables or in `~/lumina/.deploy/env`
 (sourced by the script): `DEPLOY_URL` (where the release assets are),
 `HEALTH_TIMEOUT` (default `60` seconds), `PORT` (default: from `.env`, else
-`3500`).
+`3500`), `NOTIFY_CMD` (below), `LOG_MAX_BYTES` (default 5 MB).
+
+Logs in `~/lumina/logs/` are rotated on each check once they pass
+`LOG_MAX_BYTES`, keeping one older copy as `.1`. When the release can't be
+reached, that is logged once, plus once more when it is back, rather than on
+every check.
 
 When `watch` installs a build that changes `tab-deploy.sh` itself, it
 restarts on the new version.
+
+## Rolling back a bad build by hand
+
+A build can pass its health check and still be broken in use. To go back to
+the version that ran before the last deploy:
+
+```bash
+~/lumina/tab-deploy.sh rollback
+```
+
+It swaps the binary and frontend with the ones in `.deploy/previous/`, so
+running it again returns to the newer build. The device scripts and the
+database are left as they are. The rolled-back build is not reinstalled; the
+next build CI publishes deploys as usual, so push a fix (or a revert) to
+`main`.
+
+## Notifications
+
+Set `NOTIFY_CMD` in `~/lumina/.deploy/env` to hear about deploys without
+reading logs. It runs after a deploy, an automatic rollback, a failed
+rollback and a manual rollback, with `DEPLOY_EVENT` (`deployed`,
+`rolled-back`, `rollback-failed`, `manual-rollback`) and `DEPLOY_MESSAGE` set.
+It is given 30 seconds, and its failure never affects the deploy.
+
+An Android notification (needs the Termux:API app and `pkg install termux-api`):
+
+```bash
+NOTIFY_CMD='termux-notification --title "Lumina $DEPLOY_EVENT" --content "$DEPLOY_MESSAGE"'
+```
+
+A push to your phone through [ntfy](https://ntfy.sh) (pick a hard-to-guess topic):
+
+```bash
+NOTIFY_CMD='curl -fsS -d "$DEPLOY_MESSAGE" -H "Title: Lumina $DEPLOY_EVENT" https://ntfy.sh/<your-topic>'
+```
 
 ## Manual deploys
 
@@ -157,5 +203,9 @@ the Actions tab (**Run workflow**).
 - **A build was rolled back**: the server would not start on it, usually a
   missing `.env` setting or a startup crash. `logs/server.log` says why. Push
   a fix; the next green build deploys normally.
+- **The smoke test failed in CI**: the job log shows which check failed and
+  the server's output. Run the same check locally with
+  `scripts/build-bundle.sh /tmp/b && scripts/smoke-bundle.sh /tmp/b/lumina-arm64.tar.gz`
+  (on Linux, after `apt-get install qemu-user-static libc6-arm64-cross`).
 - **Deploy a skipped build anyway**: `rm ~/lumina/.deploy/last-release` and
   run `~/lumina/tab-deploy.sh`.
