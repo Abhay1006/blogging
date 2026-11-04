@@ -34,7 +34,7 @@ Lumina is a sleek, modern, and high-performance blogging platform built with a f
 
 ### Prerequisites
 - Go 1.26+
-- Node.js 20+
+- Node.js 20+ and pnpm (the version is pinned in `frontend/package.json`; `npm install -g pnpm` or `corepack enable`)
 
 No database server is required. The backend creates its SQLite file on first run.
 
@@ -60,17 +60,17 @@ No database server is required. The backend creates its SQLite file on first run
    ```
 2. Install dependencies:
    ```bash
-   npm install
+   pnpm install
    ```
 3. Copy `.env.example` to `.env` (it points at `http://localhost:10000/api`).
 4. Run the development server:
    ```bash
-   npm run dev
+   pnpm run dev
    ```
 5. Lint and test:
    ```bash
-   npm run lint
-   npm test
+   pnpm run lint
+   pnpm test
    ```
 
 ## 🔒 Environment Variables

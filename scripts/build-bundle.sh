@@ -12,7 +12,7 @@
 #   <out-dir>/lumina-arm64.tar.gz.sha256  checksum, in `sha256sum -c` format
 #   <out-dir>/VERSION                     commit sha, then its subject line
 #
-# Expects frontend dependencies to be installed (npm ci in frontend/), Go, and
+# Expects frontend dependencies to be installed (pnpm install in frontend/), Go, and
 # cmake plus a C compiler for termux-elf-cleaner.
 set -euo pipefail
 
@@ -50,7 +50,7 @@ ensure_cleaner() {
 # The frontend is served by the Go binary from the same origin, so the API is
 # always at /api in production. Set explicitly because CI has no frontend/.env.
 say "Building frontend"
-(cd "$REPO/frontend" && VITE_API_URL="${VITE_API_URL:-/api}" npm run build >/dev/null)
+(cd "$REPO/frontend" && VITE_API_URL="${VITE_API_URL:-/api}" pnpm run build >/dev/null)
 
 # -buildmode=pie is required: Android refuses a static ET_EXEC binary
 # ("unexpected e_type: 2"). It only accepts position-independent ET_DYN.
