@@ -114,7 +114,18 @@ Re-running is safe: every write is an upsert keyed on the original id.
 ## 🚀 Deployment
 
 The target is a Termux/Android device reached over a Cloudflare tunnel.
-`./deploy.sh` builds everything locally and ships it:
+
+### CI/CD
+
+Every push to `main` that passes CI is built for the tablet and published as
+the `tablet-deploy` release; `~/lumina/tab-deploy.sh watch` on the tablet
+installs it, health-checks it and rolls back if it fails. Setup and details:
+[docs/TAB-DEPLOY.md](docs/TAB-DEPLOY.md).
+
+### Manual deploy
+
+`./deploy.sh` builds everything locally (with the same
+`scripts/build-bundle.sh` CI uses) and ships it over SSH:
 
 ```bash
 ./deploy.sh                      # defaults: HOST=ssh.oniichad.com, PORT=3500
@@ -122,7 +133,7 @@ HOST=other.example ./deploy.sh
 ```
 
 On the device, `~/lumina/` holds the binary, the `public/` frontend build,
-`lumina.db`, and `start.sh` / `stop.sh` / `status.sh`.
+`lumina.db`, and `start.sh` / `stop.sh` / `status.sh` / `tab-deploy.sh`.
 
 ### Why the build is the shape it is
 
@@ -133,7 +144,7 @@ Three Android-specific constraints shaped this, each found the hard way:
    `unexpected e_type: 2`. Only position-independent `ET_DYN` is accepted.
 2. **The ELF needs patching.** Go emits a TLS segment aligned to 8; ARM64
    Bionic demands at least 64, and otherwise fails with
-   `TLS segment is underaligned`. `deploy.sh` builds and runs
+   `TLS segment is underaligned`. `scripts/build-bundle.sh` builds and runs
    [termux-elf-cleaner](https://github.com/termux/termux-elf-cleaner) to fix
    that and to strip unsupported `DF_1_*` flags.
 3. **Nothing is built on the device.** Go is installed there and building
@@ -154,8 +165,9 @@ binary path, and by a metrics port unique to the blog's tunnel -- because a
 broad `pkill cloudflared` would also kill the tunnel that serves SSH into the
 device.
 
-Nothing supervises these processes across reboots or OOM kills. `termux-boot`
-is the fix if you want them to come back automatically.
+`tab-deploy.sh watch` restarts the server or the tunnel if either dies, and
+Termux:Boot can start the watcher at boot (see
+[docs/TAB-DEPLOY.md](docs/TAB-DEPLOY.md)).
 
 ## 📝 License
 This project is for demonstration purposes. Built for stories.

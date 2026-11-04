@@ -5,6 +5,10 @@
 # and the built frontend, backed by a local SQLite file. Nothing but the
 # Cloudflare tunnel talks to the outside world.
 #
+# Normally CI builds and publishes every green commit on main, and
+# tab-deploy.sh on the device installs it (docs/TAB-DEPLOY.md). This script is
+# the manual path: first-time setup, or shipping a local build directly.
+#
 # Everything is built here on the workstation, never on the device. An earlier
 # revision ran "go build" over SSH on the tablet; the Go toolchain's memory use
 # tripped Android's low-memory killer, which killed sshd and cloudflared and
@@ -15,14 +19,12 @@ HOST="${HOST:-ssh.oniichad.com}"
 REMOTE_DIR="${REMOTE_DIR:-lumina}"
 PORT="${PORT:-3500}" # 3000 and 4000 are already taken on the device
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CACHE="$REPO/.deploy-cache"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 SSH_OPTS=(-o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # The tunnel to this device drops under sustained load, so a single failed
 # attempt is not a meaningful signal.
@@ -58,62 +60,28 @@ preflight() {
 	say "Device reachable"
 }
 
-# ensure_cleaner builds termux-elf-cleaner, which rewrites two things Android's
-# loader rejects in a Go-produced ELF: the TLS segment alignment (Go emits 8,
-# ARM64 Bionic demands at least 64) and some unsupported DF_1_* flags.
-ensure_cleaner() {
-	CLEANER="$CACHE/termux-elf-cleaner/build/termux-elf-cleaner"
-	[[ -x "$CLEANER" ]] && return 0
-
-	say "Building termux-elf-cleaner (one time)"
-	mkdir -p "$CACHE"
-	[[ -d "$CACHE/termux-elf-cleaner" ]] || \
-		git clone --depth 1 -q https://github.com/termux/termux-elf-cleaner.git "$CACHE/termux-elf-cleaner"
-	cmake -S "$CACHE/termux-elf-cleaner" -B "$CACHE/termux-elf-cleaner/build" \
-		-DCMAKE_BUILD_TYPE=Release >/dev/null
-	cmake --build "$CACHE/termux-elf-cleaner/build" >/dev/null
-	[[ -x "$CLEANER" ]] || die "could not build termux-elf-cleaner"
-}
-
 build() {
-	say "Building frontend"
-	(cd "$REPO/frontend" && npm run build >/dev/null)
-
-	# -buildmode=pie is required: Android refuses a static ET_EXEC binary
-	# ("unexpected e_type: 2"). It only accepts position-independent ET_DYN.
-	say "Cross-compiling server for arm64 (PIE)"
-	(cd "$REPO/backend" && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-		go build -buildmode=pie -trimpath -ldflags="-s -w" -o "$STAGE/lumina-server" .)
-
-	ensure_cleaner
-	say "Patching ELF for Bionic"
-	"$CLEANER" --api-level 24 "$STAGE/lumina-server"
-
-	# Go binaries compress to roughly half their size, which matters on a link
-	# this fragile.
-	gzip -9 "$STAGE/lumina-server"
-	cp -R "$REPO/frontend/dist" "$STAGE/public"
-	COPYFILE_DISABLE=1 tar czf "$STAGE/public.tar.gz" -C "$STAGE" public
-	rm -rf "$STAGE/public"
-	cp "$REPO/backend/scripts/"*.sh "$STAGE/"
-
-	say "Built $(du -h "$STAGE/lumina-server.gz" | cut -f1) binary, $(du -h "$STAGE/public.tar.gz" | cut -f1) frontend"
+	"$REPO/scripts/build-bundle.sh" "$STAGE"
 }
 
 push() {
-	retry ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p ~/$REMOTE_DIR/logs"
-	for f in lumina-server.gz public.tar.gz start.sh stop.sh status.sh; do
-		say "Uploading $f"
-		retry scp "${SSH_OPTS[@]}" -C "$STAGE/$f" "$HOST:~/$REMOTE_DIR/$f"
-	done
+	retry ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p ~/$REMOTE_DIR/logs ~/$REMOTE_DIR/.deploy"
+	say "Uploading lumina-arm64.tar.gz"
+	retry scp "${SSH_OPTS[@]}" "$STAGE/lumina-arm64.tar.gz" "$HOST:~/$REMOTE_DIR/.deploy/manual.tar.gz"
 
+	# Unpacked beside the live files and moved into place by rename, so the
+	# running binary is never overwritten in place.
 	say "Unpacking"
 	retry ssh "${SSH_OPTS[@]}" "$HOST" "
 		set -e
 		cd ~/$REMOTE_DIR
-		rm -f lumina-server && gzip -df lumina-server.gz
-		chmod +x lumina-server *.sh
-		rm -rf public && tar xzf public.tar.gz && rm public.tar.gz
+		# Already unpacked by an attempt whose connection dropped afterwards.
+		[ -f .deploy/manual.tar.gz ] || exit 0
+		rm -rf .deploy/manual && mkdir -p .deploy/manual
+		tar xzf .deploy/manual.tar.gz -C .deploy/manual
+		mv -f .deploy/manual/lumina-server .deploy/manual/VERSION .deploy/manual/*.sh .
+		rm -rf public && mv .deploy/manual/public public
+		rm -rf .deploy/manual .deploy/manual.tar.gz
 	"
 }
 
