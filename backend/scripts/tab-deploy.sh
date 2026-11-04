@@ -47,6 +47,7 @@ PREVIOUS="$STATE/previous"
 LAST_RELEASE="$STATE/last-release" # release sha last handled, deployed or not
 FAILED="$STATE/failed"             # release sha that failed and was rolled back
 LOCK="$STATE/lock"
+WATCHER_PID="$STATE/watcher.pid" # pid of `watch`; exec keeps it across self-updates
 LOG="$DIR/logs/deploy.log"
 SERVER="$DIR/lumina-server"
 
@@ -268,6 +269,7 @@ watch() {
 	before="$(cksum <"$self")"
 	# Keep Android from suspending the process while the screen is off.
 	termux-wake-lock 2>/dev/null
+	echo $$ >"$WATCHER_PID"
 	trap 'rm -rf "$LOCK"; exit 0' INT TERM
 	log "watching $DEPLOY_URL every ${interval}s"
 	while true; do
@@ -289,7 +291,15 @@ status() {
 	printf 'tunnel:    '
 	pgrep -f "$METRICS" >/dev/null 2>&1 && echo "running" || echo "stopped"
 	printf 'watcher:   '
-	pgrep -f "tab-deploy.sh watch" >/dev/null 2>&1 && echo "running" || echo "not running"
+	# Checked by pid, not by name: other apps on the tablet run their own
+	# tab-deploy.sh watch, and a name match would report theirs as ours.
+	local pid
+	pid="$(cat "$WATCHER_PID" 2>/dev/null)"
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && grep -q "tab-deploy.sh" "/proc/$pid/cmdline" 2>/dev/null; then
+		echo "running (pid $pid)"
+	else
+		echo "not running"
+	fi
 }
 
 case "${1:-once}" in

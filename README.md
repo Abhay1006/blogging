@@ -165,9 +165,27 @@ binary path, and by a metrics port unique to the blog's tunnel -- because a
 broad `pkill cloudflared` would also kill the tunnel that serves SSH into the
 device.
 
-`tab-deploy.sh watch` restarts the server or the tunnel if either dies, and
-Termux:Boot can start the watcher at boot (see
-[docs/TAB-DEPLOY.md](docs/TAB-DEPLOY.md)).
+### Automatic restarts
+
+Lumina is supervised by the device-wide `~/watchdog.sh`, which also looks
+after the other apps on the tablet. It lives outside this repo. It runs:
+
+- at boot, via Termux:Boot (`~/.termux/boot/00-watchdog`),
+- every 5 minutes, from a `watchdog-loop` tmux window,
+- every 15 minutes, as an Android JobScheduler job (survives tmux dying).
+
+Each run calls `~/lumina/start.sh` if the server is not running or
+`/api/health` fails, or if the tunnel is down or has no edge connections after
+a 90s grace period. Any process that is running but hung is killed first. Its
+actions go to `~/watchdog.log`.
+
+Because the watchdog restarts whatever is down, `./stop.sh` only stops the
+blog until the next run (5 minutes at most).
+
+The watchdog also keeps the CD watcher (`tab-deploy.sh watch`, see
+[docs/TAB-DEPLOY.md](docs/TAB-DEPLOY.md)) running in a `lumina-deploy` tmux
+window, and skips its Lumina checks while a deploy holds
+`~/lumina/.deploy/lock`, so it never restarts the server mid-swap.
 
 ## 📝 License
 This project is for demonstration purposes. Built for stories.

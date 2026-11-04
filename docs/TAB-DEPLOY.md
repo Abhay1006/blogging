@@ -87,6 +87,10 @@ killed either, which nothing did before.
    (Apps → Termux → Battery). Run it inside `tmux` if you start it over SSH,
    so it survives the session ending.
 
+   On this tablet the device-wide `~/watchdog.sh` already does this: it
+   keeps the watcher running in a `lumina-deploy` tmux window and starts it
+   at boot, so steps 3 and 4 are only needed on a device without it.
+
 4. **Start it when the tablet boots** (optional, recommended). Install
    [Termux:Boot](https://f-droid.org/packages/com.termux.boot/), open it once,
    then:
