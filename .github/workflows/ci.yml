@@ -22,8 +22,8 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
@@ -39,8 +39,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -54,44 +54,62 @@ jobs:
     name: Deploy scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck
         run: shellcheck deploy.sh scripts/*.sh backend/scripts/*.sh
 
-  # Continuous delivery for the Termux tablet. Once a commit on main passes
-  # every check, build the arm64 bundle and publish it as the `tablet-deploy`
-  # release. The tablet runs backend/scripts/tab-deploy.sh, which watches that
-  # release, so it only ever installs commits that passed CI. Nothing is built
-  # on the tablet itself. See docs/TAB-DEPLOY.md.
-  publish-tablet:
-    name: Publish tablet build
-    needs: [backend, frontend, scripts]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+  # Builds the arm64 tablet bundle on every run, pull requests included, and
+  # boots it under qemu to check it serves the API and the frontend. A change
+  # that breaks the cross-compile, the ELF patching or the bundle itself fails
+  # here, before it is merged.
+  bundle:
+    name: Tablet bundle
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
         working-directory: frontend
-
       - name: Build bundle
         run: scripts/build-bundle.sh "$RUNNER_TEMP/tablet"
-
-      - uses: actions/upload-artifact@v4
+      - name: Smoke-test the bundle
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static libc6-arm64-cross > /dev/null
+          scripts/smoke-bundle.sh "$RUNNER_TEMP/tablet/lumina-arm64.tar.gz"
+      - uses: actions/upload-artifact@v6
         with:
           name: lumina-arm64
           path: ${{ runner.temp }}/tablet
           retention-days: 14
+
+  # Continuous delivery for the Termux tablet. Once a commit on main passes
+  # every check, publish the bundle built and smoke-tested above as the
+  # `tablet-deploy` release. The tablet runs backend/scripts/tab-deploy.sh,
+  # which watches that release, so it only ever installs commits that passed
+  # CI. Nothing is built on the tablet itself. See docs/TAB-DEPLOY.md.
+  publish-tablet:
+    name: Publish tablet build
+    needs: [backend, frontend, scripts, bundle]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      # The exact files the bundle job tested, not a rebuild.
+      - uses: actions/download-artifact@v7
+        with:
+          name: lumina-arm64
+          path: ${{ runner.temp }}/tablet
 
       - name: Publish the tablet-deploy release
         env:
