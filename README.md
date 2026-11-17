@@ -188,4 +188,4 @@ window, and skips its Lumina checks while a deploy holds
 `~/lumina/.deploy/lock`, so it never restarts the server mid-swap.
 
 ## 📝 License
-This project is for demonstration purposes. Built for stories.
+[MIT](LICENSE) © 2026 Abhay Pratap Singh
