@@ -89,7 +89,7 @@ jobs:
       - name: Smoke-test the bundle
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-static libc6-arm64-cross > /dev/null
+          sudo apt-get install -y -qq qemu-user libc6-arm64-cross > /dev/null
           scripts/smoke-bundle.sh "$RUNNER_TEMP/tablet/lumina-arm64.tar.gz"
       - uses: actions/upload-artifact@v7
         with:

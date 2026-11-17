@@ -8,8 +8,9 @@
 #
 # Usage: scripts/smoke-bundle.sh <lumina-arm64.tar.gz>
 #
-# Needs curl, and on non-arm64 hosts qemu-user-static plus libc6-arm64-cross
-# (Debian/Ubuntu: apt-get install qemu-user-static libc6-arm64-cross).
+# Needs curl, and on non-arm64 hosts qemu plus libc6-arm64-cross
+# (Debian/Ubuntu: apt-get install qemu-user libc6-arm64-cross; older releases
+# also ship the binary as qemu-aarch64-static in qemu-user-static).
 set -euo pipefail
 
 TARBALL="${1:?usage: scripts/smoke-bundle.sh <lumina-arm64.tar.gz>}"
@@ -38,9 +39,9 @@ tar xzf "$TARBALL" -C "$WORK"
 
 run=(./lumina-server)
 if [ "$(uname -m)" != "aarch64" ] && [ "$(uname -m)" != "arm64" ]; then
-	command -v qemu-aarch64-static >/dev/null ||
-		fail "not on arm64 and qemu-aarch64-static is missing (apt-get install qemu-user-static libc6-arm64-cross)"
-	run=(qemu-aarch64-static -L /usr/aarch64-linux-gnu ./lumina-server)
+	qemu="$(command -v qemu-aarch64 || command -v qemu-aarch64-static)" ||
+		fail "not on arm64 and qemu-aarch64 is missing (apt-get install qemu-user libc6-arm64-cross)"
+	run=("$qemu" -L /usr/aarch64-linux-gnu ./lumina-server)
 fi
 
 say "Starting the bundled server on port $PORT"
